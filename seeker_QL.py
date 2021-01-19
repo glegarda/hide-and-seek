@@ -20,8 +20,8 @@ import torchvision
 import torch.nn.functional as F
 import cv2
 import numpy as np
+import imutils
 
-from jetbot import ObjectDetector
 from jetbot import Camera
 from jetbot import Robot
 from jetbot import bgr8_to_jpeg
@@ -81,8 +81,9 @@ n_actions = len(action_space)
 
 # Define sate space
 # State: {x,s,f} = {horizontal position of detected jetbot, seen/not seen, free/blocked}
-camera_width = 225
-n_states = (camera_width + 1)*2*2
+camera_x = 224
+camera_y = 224
+n_states = (camera_x + 1)*2*2
 
 
 # Collision detection
@@ -103,7 +104,7 @@ def preprocess(camera_value):
 	'''Transforms frame from the camera for posterior processing'''
 	global device, normalize
 	x = camera_value
-	x = cv2.resize(x, (224, 224))
+	x = cv2.resize(x, (camera_x, camera_y))
 	x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
 	x = x.transpose((2, 0, 1))
 	x = torch.from_numpy(x).float()
@@ -114,28 +115,31 @@ def preprocess(camera_value):
 
 
 # Object detection
-# PUT IN OUR ENGINE IN NEXT LINE ===========================================================
-model = ObjectDetector('ssd_mobilenet_v2_coco.engine')
-# ==========================================================================================
-camera = Camera.instance(width=300, height=300)
+camera = Camera.instance(width=camera_x, height=camera_y)
 
-def detection_center(detection):
-	'''Computes the center x, y coordinates of the object'''
-	bbox = detection['bbox']
-	center_x = (bbox[0] + bbox[2]) / 2.0 - 0.5
-	center_y = (bbox[1] + bbox[3]) / 2.0 - 0.5
-	return (center_x, center_y)
+def crop_bottom_half(image):
+	'''Returns bottom half of image'''
+	cropped_img = image[int(image.shape[0]/2):image.shape[0], 0:image.shape[1], 0:image.shape[2]]
+	return cropped_img
 
 def detect_jetbot(image):
 	'''Detects another jetbot and computes its center'''
-	detections = model(image)
-	# SET CORRECT LABEL VALUE IN NEXT LINE ==================================================
-	matching_detections = [d for d in detections[0] if d['label'] == int(label_widget.value)]
-	# =======================================================================================
-	det = matching_detections[0]
+	image = crop_bottom_half(image)
+	hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+	lower_green = np.array([5, 20, 5])
+	upper_green = np.array([100, 150, 100])
+	mask = cv2.inRange(hsv, lower_green, upper_green)
+	cnts = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+	cnts = imutils.grab_contours(cnts)
 	center = None
-	if det is not None:
-		center = detection_center(det)
+	for c in cnts:
+		area = cv2.contourArea(c)
+		if (20000 > area > 200):
+			x, y, w, h = cv2.boundingRect(c)
+			cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+			M = cv2.moments(c)
+			cx = int(M["m10"] / M["m00"])
+			center = cx
 	return center
 
 
@@ -166,7 +170,7 @@ def update_state():
 	# Execute collision model to determine if blocked
 	collision_output = collision_model(preprocess(image)).detach().cpu()
 	prob_blocked = float(F.softmax(collision_output.flatten(), dim=1)[0])
-	if prob_blocked > 0.5:
+	if prob_blocked > 0.7:
 		state_list[2] = 1
 	else:
 		state_list[2] = 0
