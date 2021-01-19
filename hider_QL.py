@@ -163,12 +163,11 @@ def update_state():
 		state_list[0] = None
 	
 	# Process signal from server and set detection status
-	while True:
-		data = connection.recv(8).decode()
-		if data == '1':
-			state_list[1] = 1
-		else:
-			state_list[1] = 0
+	data = connection.recv(8).decode()
+	if data == '1':
+		state_list[1] = 1
+	else:
+		state_list[1] = 0
 	
 	# Execute collision model to determine if blocked
 	collision_output = collision_model(preprocess(image)).detach().cpu()
@@ -230,8 +229,8 @@ q_table = np.zeros((n_states, n_actions))
 #                        #
 ##########################
 
-n_train_episodes = 100    # number of rollouts for training
-max_steps = 240           # maximum number of steps per rollout
+n_train_episodes = 3      # number of rollouts for training
+max_steps = 5             # maximum number of steps per rollout
 
 gamma = 0.9               # discout factor
 alpha = 0.6               # learning rate
