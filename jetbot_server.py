@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding: utf-8
 
 # This notebook defines a server class that handles the communication with the jetbots. 
@@ -8,6 +8,13 @@
 import socket
 import sys
 import threading
+import signal
+
+
+def signal_handler(signal, frame):
+	print('\nKeyboard interrupt! Shutting down server...')
+	sock.shutdown(socket.SHUT_RDWR)
+	
 
 class Server:
 	def __init__(self):
@@ -15,94 +22,74 @@ class Server:
 		self.ip = 'localhost'         # Server IP address
 		self.port = 10000             # Server port number
 		self.buffer_size = 16         # Buffer size
-		self.hider_ready = False      # True if hider is ready to begin training
-		self.seeker_ready = False     # True if seeker is ready to begin training
-		self.begin_training = False   # True to toggle the beginning of the training process
-		self.episode_ended = False    # True if the hider has finished the current episode
-		self.detection_set = False    # True if seeker data has been processed
-		self.detected = '0'           # Detection status (1: visual contact; 0: no visual contact)
-		self.ping = '1'               # Arbitrary small data packet
+		self.ping = b'1'              # Arbitrary small data packet
 
 	def start_server(self):
 		try:
+			global sock
 			sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-			sock.bind((self.ip, self.port))
+			sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+			sock.bind(('', self.port))
 			sock.listen(5)
-			while True:
+			for i in range(2):
 				client_socket, addr = sock.accept()
 				self.clients.append(client_socket)
-				if len(self.clients) == 1:
-					print ('Connected with ' + addr[0] + ':' + str(addr[1]) + '--> SEEKER')
-					threading.Thread(target=self.threaded_seeker, args=(client_socket,)).start()
-				elif len(self.clients) == 2:
-					print ('Connected with ' + addr[0] + ':' + str(addr[1]) + '--> HIDER')
-					threading.Thread(target=self.threaded_hider, args=(client_socket,)).start()
+				if i == 0:
+					print('Connected with ' + addr[0] + ':' + str(addr[1]) + '--> SEEKER')
+				else:
+					print('Connected with ' + addr[0] + ':' + str(addr[1]) + '--> HIDER')
+			thread = threading.Thread(target=self.threaded_clients)
+			thread.start()
+			thread.join()
+			sock.shutdown(socket.SHUT_RDWR)
 			sock.close()
-		except socket.error as msg:
-			print ('Could not start SERVER thread.')
+		except OSError as error:
+			sock.close()
 			sys.exit()
 	
-	def threaded_seeker(self, client_socket):
-		# Wait until both hider and seeker are ready to begin training
-		data = client_socket.recv(self.buffer_size).decode()
-		if data:
-			print(data)
-			self.seeker_ready = True
-			while not self.hider_ready:
-				pass
-			input("Press ENTER to begin training:")
-			self.begin_training = True
-		# Training loop
-		while self.begin_training:
-			# Receive and process detection status
-			data = client_socket.recv(self.buffer_size).decode()
-			if data:
-				self.detected = data
-				self.detection_set = True
-			else:
-				break
-			# Receive episode status and toggle the next one
-			data = client_socket.recv(self.buffer_size).decode()
-			if data:
-				if data == '1':
-					while not self.episode_ended:
-						pass
-					input("Episode done. Press ENTER to begin next episode:")
-					for client in self.clients:
-						client.send(ping.encode())
-					self.episode_ended = False
-			else:
-				break
-		self.clients.remove(client_socket)
-		client_socket.close()
-		
-	def threaded_hider(self, client_socket):
-		# Wait for hider to be ready to begin training
-		data = client_socket.recv(self.buffer_size).decode()
-		if data:
-			print(data)
-			self.hider_ready = True
-		# Wait for user to toggle the beginning of the training process
-		while not self.begin_training:
-			pass
-		# Training loop
-		while self.begin_training:
-			# Wait for seeker and send detection status
-			while not self.detection_set:
-				pass
-			client_socket.send(self.detected.encode())
-			self.detection_set = False
-			# Receive and process episode status
-			data = client_socket.recv(self.buffer_size).decode()
-			if data:
-				if data == '1':
-					self.episode_ended = True
-			else:
-				break
-		self.clients.remove(client_socket)
-		client_socket.close()
 
-# Start server
-server = Server()
-threading.Thread(target=server.start_server).start()
+	def threaded_clients(self):
+		# Wait until both hider and seeker are ready to begin training
+		for client in self.clients:
+			data_ready = client.recv(self.buffer_size).decode()
+			print(data_ready)
+		input('Press ENTER to begin training:')
+		# Send signal to begin training
+		for client in self.clients:
+			client.sendall(self.ping)
+		# Training loop
+		for episodes in range(15):
+			# Receive and process detection status
+			request_detection = self.clients[1].recv(self.buffer_size)
+			self.clients[0].sendall(request_detection)
+			data_detection = self.clients[0].recv(self.buffer_size)
+			self.clients[1].sendall(data_detection)
+			for iterations in range(100):
+				# Receive and process detection status
+				request_detection = self.clients[1].recv(self.buffer_size)
+				self.clients[0].sendall(request_detection)
+				data_detection = self.clients[0].recv(self.buffer_size)
+				self.clients[1].sendall(data_detection)
+			# Toggle new episode
+			for client in self.clients:
+				data_episode = client.recv(self.buffer_size).decode()
+			input('Episode done. Reset the initial configuration and press ENTER to begin a new episode:')
+			for client in self.clients:
+				client.sendall(self.ping)
+		# Clean up
+		print('Training completed. Shutting down server...')
+		for client in self.clients:
+			client.close()
+		self.clients.clear() 
+
+				
+if __name__ == "__main__":
+	# Handle keyboard interrupt (Ctrl-C)
+	signal.signal(signal.SIGINT, signal_handler)
+
+	# Start server
+	server = Server()
+	server_thread = threading.Thread(target=server.start_server)
+	server_thread.start()
+	server_thread.join()
 
