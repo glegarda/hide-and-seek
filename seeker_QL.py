@@ -25,6 +25,8 @@ from jetbot import bgr8_to_jpeg
 socket_seeker = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # TCP/IP socket
 ping = b'1' # arbitrary small data packet
 robot = Robot() # seeker jetbot
+n_x = 9 # number of horizontal regions
+n_y = 3 # number of vertical regions
 camera_x = 224 # camera feed width
 camera_y = 224 # camera feed height
 collision_model = torchvision.models.alexnet(pretrained=False) # for collisions
@@ -49,7 +51,7 @@ def forward():
 
 def left():
 	'''Rotate anticlockwise by a fixed amout'''
-	robot.left(0.1)
+	robot.left(0.11)
 	time.sleep(0.5)
 	robot.stop()
 
@@ -88,7 +90,7 @@ def detect_jetbot(image):
 	mask = cv2.inRange(hsv, lower_green, upper_green)
 	cnts = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 	cnts = imutils.grab_contours(cnts)
-	center = camera_x
+	center = np.empty((0,2), int)
 	for c in cnts:
 		area = cv2.contourArea(c)
 		if (20000 > area > 200):
@@ -96,30 +98,62 @@ def detect_jetbot(image):
 			cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
 			M = cv2.moments(c)
 			cx = int(M["m10"] / M["m00"])
-			center = cx
-	return center
+			cy = int(int(M["m01"]/M["m00"]))
+			if cx < 100:
+				if cx < 25:
+					sol_x = 0
+				elif cx < 50:
+					sol_x = 1
+				elif cx < 75:
+					sol_x = 2
+				else:
+					sol_x = 3     
+			else:
+				if cx < 125:
+					sol_x = 4
+				elif cx < 150:
+					sol_x = 5
+				elif cx < 175:
+					sol_x = 6
+				elif cx < 200:
+					sol_x = 7    
+				else:
+					sol_x = 8
+			if cy < 30:
+				sol_y = 2 #lejos
+			elif cy < 60:
+				sol_y = 1 #medio
+			else:
+				sol_y = 0 #cerca
+			center = np.append(center, np.array([[sol_x,sol_y]]), axis=0)
+	if center.size == 0:
+		return [n_y, n_x]
+	else:
+		center = np.sort(center, axis=1)
+		return center[0,:]
 
 
 # State observation
 def update_state(): 
-	'''Computes the 3 state components from received data'''
-	# State with 3 components:
+	'''Computes the 4 state components from received data'''
+	# State with 4 components:
+	#  - Vertical position of detected hider jetbot
 	#  - Horizontal position of detected hider jetbot
 	#  - Seeing/not seeing hider
 	#  - Free/blocked
-	state_list = [None] * 3
+	state_list = [None] * 4
 	message = '0'
 	
 	# Detect hider jetbot
 	image = camera.value
-	state_list[0] = detect_jetbot(image)
+	state_list[0:1] = detect_jetbot(image)
 	
 	# Set detection status
-	if state_list[0] < (camera_x + 1):
-		state_list[1] = 1
+	if state_list[1] < n_x:
+		state_list[2] = 1
 		message = '1'
 	else:
-		state_list[1] = 0
+		state_list[2] = 0
 	request_detection = socket_seeker.recv(8)
 	socket_seeker.sendall(message.encode())
 	
@@ -127,12 +161,12 @@ def update_state():
 	collision_output = collision_model(preprocess(image)).detach().cpu()
 	prob_blocked = float(F.softmax(collision_output.flatten(), dim=0)[0])
 	if prob_blocked > 0.7:
-		state_list[2] = 1
+		state_list[3] = 1
 	else:
-		state_list[2] = 0
+		state_list[3] = 0
 	
 	# Encode state
-	state = state_list[0] + (state_list[1]*2**0 + state_list[2]*2**1)*(camera_x + 1)
+	state = state_list[0] + (state_list[1] + state_list[2]*10 + state_list[3]*20)*(n_y + 1)
 	
 	return state_list, state
 
@@ -140,14 +174,17 @@ def update_state():
 def compute_reward(action, state_list):
 	'''Calculate the reward obtained by taking action from state_list'''
 	# Reward seeing hider
-	if state_list[1] == 1:
-		reward = 1
+	if state_list[2] == 1:
+		reward = 4
 	else:
-		reward = -1
+		reward = -4
 	
-	# Penalise collisions
-	if state_list[2] == 1 and action == 1:
-		reward = -10
+	# Penalise collisions and reward advancing
+	if action == 1:
+		if state_list[3] == 1:
+			reward += -2
+		else:
+			reward += 2
 
 	return reward
 
@@ -175,7 +212,7 @@ if __name__ == "__main__":
 	
 	# Environment
 	n_actions = len(action_space)
-	n_states = (camera_x + 1)*2*2
+	n_states = (n_x + 1)*(n_y + 1)*2*2
 	
 	# Collision detection
 	collision_model.classifier[6] = torch.nn.Linear(collision_model.classifier[6].in_features, 2)
@@ -187,7 +224,7 @@ if __name__ == "__main__":
 	q_table = np.zeros((n_states, n_actions))
 	
 	# Hyperparameters
-	n_train_episodes = 15     # number of rollouts for training
+	n_train_episodes = 30     # number of rollouts for training
 	max_steps = 100           # maximum number of steps per rollout
 
 	gamma = 0.9               # discout factor
@@ -195,8 +232,8 @@ if __name__ == "__main__":
 
 	epsilon = 1.0             # exploration-exploitation trade-off
 	max_epsilon = 1.0
-	min_epsilon = 0.01
-	decay_rate = 0.01
+	min_epsilon = 0.05
+	decay_rate = 0.5
 	
 	# Training stats
 	rewards_training = np.zeros(n_train_episodes)
@@ -234,6 +271,9 @@ if __name__ == "__main__":
 
 			# Update state
 			state = new_state
+
+		# Print reward
+		print('  Reward:', reward_episode)
 
 		# Reduce epsilon
 		epsilon = min_epsilon + (max_epsilon - min_epsilon)*np.exp(-decay_rate*episode)

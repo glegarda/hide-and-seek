@@ -58,7 +58,7 @@ class Server:
 		for client in self.clients:
 			client.sendall(self.ping)
 		# Training loop
-		for episodes in range(15):
+		for episodes in range(30):
 			# Receive and process detection status
 			request_detection = self.clients[1].recv(self.buffer_size)
 			self.clients[0].sendall(request_detection)
